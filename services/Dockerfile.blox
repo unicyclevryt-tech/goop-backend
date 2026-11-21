@@ -13,17 +13,22 @@ ENV BLOX_VERSION=version-1ef59424f70d4932
 ENV BLOX_ARCHIVE=https://github.com/setup-rbxcdn/webclient-archive/releases/download/webclient-version-1ef59424f70d4932/0.748.0.7481526-version-1ef59424f70d4932-2026-11-18T125351.zip
 RUN set -eux; \
     curl --fail --location --retry 3 --retry-delay 2 --output /tmp/webclient.zip "$BLOX_ARCHIVE"; \
+    echo '[goop-blox] Archive download completed'; \
+    unzip -tq /tmp/webclient.zip | tail -1; \
+    mkdir -p /tmp/webclient-extracted; \
     unzip -q /tmp/webclient.zip -d /tmp/webclient-extracted; \
-    META="$(find /tmp/webclient-extracted -type f -name WebClient.metadata.json -print -quit)"; \
-    test -n "$META"; \
-    ENGINE_DIR="$(dirname "$META")"; \
-    test -s "$ENGINE_DIR/WebClient.wasm"; \
-    test -s "$ENGINE_DIR/WasmPlayer.js"; \
-    test -s "$ENGINE_DIR/WebClient.js"; \
+    echo '[goop-blox] Engine manifests in archive:'; \
+    find /tmp/webclient-extracted -type f \( -name 'WebClient.fsindex.txt' -o -name 'WebClient.metadata.json' \) -print; \
+    MANIFEST="$(find /tmp/webclient-extracted -type f \( -name 'WebClient.fsindex.txt' -o -name 'WebClient.metadata.json' \) -print -quit)"; \
+    if test -z "$MANIFEST"; then echo '[goop-blox] ERROR: no engine manifest found'; exit 1; fi; \
+    ENGINE_DIR="$(dirname "$MANIFEST")"; \
+    for name in WebClient.wasm WasmPlayer.js WebClient.js; do \
+      if ! test -s "$ENGINE_DIR/$name"; then echo "[goop-blox] ERROR: missing required $name in $ENGINE_DIR"; exit 1; fi; \
+    done; \
     mkdir -p /app/vendor/webblox/engine; \
     cp -a "$ENGINE_DIR/." /app/vendor/webblox/engine/; \
     printf '{"clientVersionUpload":"%s","version":"0.748.0.7481526","source":"https://setup.rbxcdn.com/webclient/%s-RobloxWebClient","complete":true}\n' "$BLOX_VERSION" "$BLOX_VERSION" > /app/vendor/webblox/engine/version.json; \
-    test -s /app/vendor/webblox/engine/WebClient.metadata.json; \
+    echo "[goop-blox] Installed engine manifest: $(basename "$MANIFEST")"; \
     rm -rf /tmp/webclient.zip /tmp/webclient-extracted; \
     echo '[goop-blox] Complete archived engine installed successfully'
 
