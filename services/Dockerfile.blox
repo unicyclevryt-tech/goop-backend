@@ -1,16 +1,39 @@
-# Diagnostic GoopBlox build for Render.
+# GoopBlox: deploy an archived *complete* Roblox WebClientApp build.
+# The live Roblox CDN returns HTTP 403 for WebClient.metadata.json on version-1ef59424f70d4932.
 FROM oven/bun:1
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    git ca-certificates nodejs curl \
-    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl unzip findutils \
+  && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 RUN git clone --depth=1 https://github.com/x8rr/webblox-built.git .
 RUN bun install --frozen-lockfile
-# Check CDN metadata before the ~255MB download. Clearly report status and JSON shape.
-RUN node -e 'const url="https://clientsettings.roblox.com/v2/client-version/WebClientApp";fetch(url).then(async r=>{const b=await r.text();console.log("[goop-diagnostic] Roblox version endpoint HTTP",r.status,"body:",b.slice(0,700));if(!r.ok)process.exit(42);let j;try{j=JSON.parse(b)}catch{process.exit(43)}if(!/^version-[0-9a-f]{16}$/.test(j.clientVersionUpload||"")){console.error("[goop-diagnostic] No valid WebClientApp upload version");process.exit(44)}}).catch(e=>{console.error("[goop-diagnostic] CDN/version request failed",e);process.exit(45)})'
-# The upstream downloader logs [webblox] failed <url>: HTTP XXX (or size/network error).
-# Preserve its failure while showing a prominent summary.
-RUN set -eux; node scripts/fetch-webblox.mjs || { echo '[goop-diagnostic] Roblox engine download failed. Search ABOVE for [webblox] failed or [webblox] https'; exit 1; }
+
+# Complete engine captured 2026-11-18 (2913/2913 files, per archive release).
+# Use exactly the archived version, avoiding a mixed-version WASM/JS installation.
+ENV BLOX_VERSION=version-1ef59424f70d4932
+ENV BLOX_ARCHIVE=https://github.com/setup-rbxcdn/webclient-archive/releases/download/webclient-version-1ef59424f70d4932/0.748.0.7481526-version-1ef59424f70d4932-2026-11-18T125351.zip
+RUN set -eux; \
+    curl --fail --location --retry 3 --retry-delay 2 --output /tmp/webclient.zip "$BLOX_ARCHIVE"; \
+    unzip -q /tmp/webclient.zip -d /tmp/webclient-extracted; \
+    META="$(find /tmp/webclient-extracted -type f -name WebClient.metadata.json -print -quit)"; \
+    test -n "$META"; \
+    ENGINE_DIR="$(dirname "$META")"; \
+    test -s "$ENGINE_DIR/WebClient.wasm"; \
+    test -s "$ENGINE_DIR/WasmPlayer.js"; \
+    test -s "$ENGINE_DIR/WebClient.js"; \
+    mkdir -p /app/vendor/webblox/engine; \
+    cp -a "$ENGINE_DIR/." /app/vendor/webblox/engine/; \
+    printf '{"clientVersionUpload":"%s","version":"0.748.0.7481526","source":"https://setup.rbxcdn.com/webclient/%s-RobloxWebClient","complete":true}\n' "$BLOX_VERSION" "$BLOX_VERSION" > /app/vendor/webblox/engine/version.json; \
+    test -s /app/vendor/webblox/engine/WebClient.metadata.json; \
+    rm -rf /tmp/webclient.zip /tmp/webclient-extracted; \
+    echo '[goop-blox] Complete archived engine installed successfully'
+
+# Preserve source release's own flags if present; otherwise fetch latest settings at build.
+# A missing flags file may affect runtime compatibility, so report its status explicitly.
+RUN if test -s /app/vendor/webblox/engine/PinnedFlags.json; then \
+      echo '[goop-blox] PinnedFlags.json present in archive'; \
+    else \
+      bun -e 'const fs=require("node:fs");const p="/app/vendor/webblox/engine/PinnedFlags.json";try{const r=await fetch("https://clientsettingscdn.roblox.com/v2/settings/application/WebClientApp");if(!r.ok)throw Error("HTTP "+r.status);const j=await r.json();fs.writeFileSync(p,JSON.stringify({engine:process.env.BLOX_VERSION,pinnedAt:new Date().toISOString(),applicationSettings:j.applicationSettings}));console.log("[goop-blox] fetched flags")}catch(e){console.warn("[goop-blox] WARNING: Could not fetch pinned flags:",e.message)}'; \
+    fi
 ENV HOST=0.0.0.0
 EXPOSE 10000
 CMD ["bun", "start"]
