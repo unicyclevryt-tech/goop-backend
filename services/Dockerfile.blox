@@ -1,13 +1,16 @@
-# Independent Render service for x8rr/webblox-built.
-# Requires a substantial build: Roblox engine + assets (~255 MB).
+# Diagnostic GoopBlox build for Render.
 FROM oven/bun:1
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git ca-certificates nodejs \
+    git ca-certificates nodejs curl \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 RUN git clone --depth=1 https://github.com/x8rr/webblox-built.git .
 RUN bun install --frozen-lockfile
-RUN node scripts/fetch-webblox.mjs
+# Check CDN metadata before the ~255MB download. Clearly report status and JSON shape.
+RUN node -e 'const url="https://clientsettings.roblox.com/v2/client-version/WebClientApp";fetch(url).then(async r=>{const b=await r.text();console.log("[goop-diagnostic] Roblox version endpoint HTTP",r.status,"body:",b.slice(0,700));if(!r.ok)process.exit(42);let j;try{j=JSON.parse(b)}catch{process.exit(43)}if(!/^version-[0-9a-f]{16}$/.test(j.clientVersionUpload||"")){console.error("[goop-diagnostic] No valid WebClientApp upload version");process.exit(44)}}).catch(e=>{console.error("[goop-diagnostic] CDN/version request failed",e);process.exit(45)})'
+# The upstream downloader logs [webblox] failed <url>: HTTP XXX (or size/network error).
+# Preserve its failure while showing a prominent summary.
+RUN set -eux; node scripts/fetch-webblox.mjs || { echo '[goop-diagnostic] Roblox engine download failed. Search ABOVE for [webblox] failed or [webblox] https'; exit 1; }
 ENV HOST=0.0.0.0
 EXPOSE 10000
 CMD ["bun", "start"]
