@@ -43,16 +43,57 @@ function cors(req,res){const origin=req.headers.origin;if(origin && (ORIGINS.inc
 function apiOrigin(req){const proto=(req.headers['x-forwarded-proto']||'http').toString().split(',')[0];return `${proto}://${req.headers.host}`;}
 function reply(res,code,data){res.writeHead(code,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});res.end(JSON.stringify(data));}
 async function staticFile(p,res){const resolved=path.resolve(webRoot,p.replace(/^\/+/,''));if(!resolved.startsWith(webRoot+path.sep)) {res.writeHead(403);res.end();return;}try{let info=await stat(resolved);if(!info.isFile())throw new Error('not file');res.writeHead(200,{'Content-Type':types[path.extname(resolved)]||'application/octet-stream','Cache-Control':'no-cache'});res.end(await readFile(resolved));}catch{res.writeHead(404);res.end('Not found');}}
-function forward(req,res,service,rest){let dest=new URL(targets[service]);let requestPath=rest||'/';if(!requestPath.startsWith('/'))requestPath='/'+requestPath;const scheme=dest.protocol==='https:'?https:http;
- const headers={...req.headers,host:dest.host}; delete headers.origin; delete headers['content-length']; delete headers['connection'];
- const upstream=scheme.request({protocol:dest.protocol,hostname:dest.hostname,port:dest.port||undefined,method:req.method,path:requestPath,headers,timeout:45000},r=>{
-   const responseHeaders={...r.headers};delete responseHeaders['access-control-allow-origin'];delete responseHeaders['access-control-allow-credentials'];delete responseHeaders['transfer-encoding'];delete responseHeaders['connection'];
-   // Webblox engine requires isolated documents. The upstream sends COOP+COEP; preserve them.
+function forward(req,res,service,rest){
+ let dest=new URL(targets[service]);let requestPath=rest||'/';
+ if(!requestPath.startsWith('/'))requestPath='/'+requestPath;
+ const scheme=dest.protocol==='https:'?https:http;
+ const headers={...req.headers,host:dest.host};
+ delete headers.origin;delete headers['content-length'];delete headers['connection'];
+ // A playlist is text that needs gateway-relative URLs. Request uncompressed text.
+ const mayBeMoviePlaylist=service==='movies' && requestPath.startsWith('/api/proxy?');
+ if(mayBeMoviePlaylist)headers['accept-encoding']='identity';
+ const upstream=scheme.request({protocol:dest.protocol,hostname:dest.hostname,
+   port:dest.port||undefined,method:req.method,path:requestPath,headers,timeout:45000},r=>{
+   const responseHeaders={...r.headers};
+   delete responseHeaders['access-control-allow-origin'];
+   delete responseHeaders['access-control-allow-credentials'];
+   delete responseHeaders['transfer-encoding'];delete responseHeaders['connection'];
    if(r.statusCode===404)responseHeaders['x-goop-upstream-404']=service;
-   res.writeHead(r.statusCode||502,responseHeaders);r.pipe(res);
+   const contentType=String(r.headers['content-type']||'').toLowerCase();
+   const isHls=mayBeMoviePlaylist && (contentType.includes('mpegurl') || contentType.includes('vnd.apple.mpegurl')) && r.statusCode===200;
+   if(isHls && !r.headers['content-encoding']){
+     // x8rr/movies emits root-relative /api/proxy? in its HLS manifest.
+     // On Goop Gateway, those requests must pass through /movies/api/proxy?.
+     // Applies to media segments, nested manifests, encryption key URIs.
+     const chunks=[];let bytes=0;const max=2*1024*1024;
+     r.on('data',chunk=>{
+       bytes+=chunk.length;
+       if(bytes>max){upstream.destroy(new Error('HLS manifest exceeds 2 MB'));return;}
+       chunks.push(chunk);
+     });
+     r.on('end',()=>{
+       if(res.destroyed)return;
+       const original=Buffer.concat(chunks).toString('utf8');
+       const corrected=original.replace(/(^|["'=])\/api\/proxy\?/gm,'$1/movies/api/proxy?');
+       delete responseHeaders['content-length'];
+       delete responseHeaders['content-encoding'];
+       responseHeaders['content-type']='application/vnd.apple.mpegurl; charset=utf-8';
+       responseHeaders['cache-control']='no-store';
+       res.writeHead(200,responseHeaders);res.end(corrected);
+     });
+     r.on('error',e=>{if(!res.headersSent){res.writeHead(502);res.end('Playlist response failed: '+e.message)}});
+     return;
+   }
+   res.writeHead(r.statusCode||502,responseHeaders);
+   r.pipe(res);
  });
  upstream.on('timeout',()=>upstream.destroy(new Error('Upstream timeout')));
- upstream.on('error',e=>{if(!res.headersSent){res.writeHead(502,{'Content-Type':'application/json'});res.end(JSON.stringify({error:'Backend unavailable',service,detail:e.message}));}else res.destroy(e);});req.pipe(upstream);
+ upstream.on('error',e=>{
+   if(!res.headersSent){res.writeHead(502,{'Content-Type':'application/json'});
+      res.end(JSON.stringify({error:'Backend unavailable',service,detail:e.message}));}
+   else res.destroy(e);
+ });
+ req.pipe(upstream);
 }
 const server=http.createServer(async(req,res)=>{
  cors(req,res);if(req.method==='OPTIONS'){res.writeHead(204);res.end();return;}
