@@ -1,6 +1,13 @@
+# Independent Render service for x8rr/webblox-built.
+# Requires a substantial build: Roblox engine + assets (~255 MB).
 FROM oven/bun:1
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates nodejs && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git ca-certificates nodejs \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-RUN git clone --depth=1 https://github.com/x8rr/webblox-built.git . && bun install
-# Downloads official engine files at first startup; they are large and may require Roblox access.
-CMD ["sh","-c","bun run fetch:webblox && bun start"]
+RUN git clone --depth=1 https://github.com/x8rr/webblox-built.git .
+RUN bun install --frozen-lockfile
+RUN node scripts/fetch-webblox.mjs
+ENV HOST=0.0.0.0
+EXPOSE 10000
+CMD ["bun", "start"]
