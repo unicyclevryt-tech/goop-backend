@@ -1,0 +1,59 @@
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    ports:
+      - "${GOOP_PORT:-4000}:4000"
+    environment:
+      GOOP_S3_ORIGIN: ${GOOP_S3_ORIGIN:-https://mathscholar.s3.us-east-2.amazonaws.com}
+      PORT: 4000
+      MOVIES_URL: http://movies:3000
+      MUSIC_URL: http://music:2010
+      MANGA_URL: http://manga:3000
+      BLOX_URL: http://blox:8080
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+    restart: unless-stopped
+  movies:
+    build:
+      context: .
+      dockerfile: services/Dockerfile
+      args:
+        REPO: x8rr/movies
+    environment:
+      PORT: 3000
+      HOST: 0.0.0.0
+      TMDB_API_KEY: ${TMDB_API_KEY:-}
+    restart: unless-stopped
+  music:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.music
+    environment:
+      MUSIC_PORT: 2010
+      YTM_BASE: ${YTM_BASE:-}
+      YT_DLP_PATH: /usr/local/bin/yt-dlp
+    volumes:
+      - music-cache:/app/data
+    restart: unless-stopped
+  manga:
+    build:
+      context: .
+      dockerfile: services/Dockerfile
+      args:
+        REPO: x8rr/manga
+    environment:
+      PORT: 3000
+      HOST: 0.0.0.0
+    restart: unless-stopped
+  blox:
+    profiles: ["blox"]
+    build:
+      context: .
+      dockerfile: services/Dockerfile.blox
+    environment:
+      PORT: 8080
+      HOST: 0.0.0.0
+    restart: unless-stopped
+volumes:
+  music-cache:

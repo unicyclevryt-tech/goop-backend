@@ -1,0 +1,7 @@
+FROM oven/bun:1
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl python3 ffmpeg && rm -rf /var/lib/apt/lists/*
+RUN curl -fL --retry 3 https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && chmod +x /usr/local/bin/yt-dlp
+WORKDIR /app
+RUN git clone --depth=1 https://github.com/x8rr/music.git . && bun install
+ENV YT_DLP_PATH=/usr/local/bin/yt-dlp
+CMD ["bun","start"]
