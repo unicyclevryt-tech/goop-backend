@@ -32,6 +32,7 @@ async function inspectUpstream(service){
  try{
   const response=await fetch(checkUrl,{signal:ctrl.signal,redirect:'manual'});
   const ok=response.ok;
+  await response.body?.cancel().catch(()=>{});
   return {status:ok?'online':'http_error',httpStatus:response.status,
     configuredHost:dest.host,checkedPath:probePaths[service],
     message:ok?'Service responded':`Upstream returned HTTP ${response.status}. Verify the service, route, and Render configuration.`};
@@ -53,7 +54,7 @@ function forward(req,res,service,rest){
  const mayBeMoviePlaylist=service==='movies' && requestPath.startsWith('/api/proxy?');
  if(mayBeMoviePlaylist)headers['accept-encoding']='identity';
  const upstream=scheme.request({protocol:dest.protocol,hostname:dest.hostname,
-   port:dest.port||undefined,method:req.method,path:requestPath,headers,timeout:45000},r=>{
+   port:dest.port||undefined,method:req.method,path:requestPath,headers,timeout:90000},r=>{
    const responseHeaders={...r.headers};
    delete responseHeaders['access-control-allow-origin'];
    delete responseHeaders['access-control-allow-credentials'];
@@ -100,13 +101,19 @@ const server=http.createServer(async(req,res)=>{
  if(!['GET','HEAD'].includes(req.method)){res.writeHead(405);res.end('Read-only gateway');return;}
  let pathname;try{pathname=new URL(req.url||'/', 'http://local').pathname;}catch{res.writeHead(400);res.end();return;}
  if(pathname==='/health')return reply(res,200,{status:'ok',service:'goop-gateway'});
+ if(pathname==='/api/ready'){
+  const service=new URL(req.url,'http://local').searchParams.get('service');
+  if(!Object.hasOwn(targets,service||''))return reply(res,400,{error:'Unknown service'});
+  const result=await inspectUpstream(service);
+  return reply(res,result.status==='online'?200:503,{service,...result});
+ }
  if(pathname==='/api/status'){
   const entries=await Promise.all(['movies','music','manga','blox'].map(async name=>[name,await inspectUpstream(name)]));
   return reply(res,200,{gateway:'ok',services:Object.fromEntries(entries),note:'HTTP reachability does not confirm playback or login.'});
  }
  if(pathname==='/goop-backend-config.json'){
   const root=apiOrigin(req);
-  return reply(res,200,{moviesBase:`${root}/movies/`,musicBase:`${root}/music/`,mangaBase:`${root}/manga/`,bloxBase:`${root}/`,gameHost:'',notes:'Blox requires optional service and must launch as a top-level page'});
+  return reply(res,200,{moviesBase:`${root}/movies/`,musicBase:`${root}/music/`,mangaBase:`${root}/manga/`,bloxBase:targets.blox.startsWith('https://')?new URL('/',targets.blox).href:'',gameHost:'',notes:'Blox requires optional service and must launch as a top-level page'});
  }
  // Fixed GitHub game collections. This is a content proxy, not an arbitrary URL proxy.
  const g=pathname.match(/^\/games\/(ugs|seraph|truffled|ckv)\/(.*)$/);
