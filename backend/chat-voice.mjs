@@ -1,5 +1,5 @@
 import { createHmac, randomUUID } from 'node:crypto';
-import { db } from './chat-store.mjs';
+import { one, all } from './chat-store.mjs';
 import { fail, rate } from './chat-policy.mjs';
 
 const seats=new Map();
@@ -20,14 +20,14 @@ function ice(uid) {
   }
   return servers;
 }
-export function blocked(a,b){
-  return !!db().prepare('SELECT 1 FROM blocks WHERE (owner=? AND target=?) OR (owner=? AND target=?)').get(a,b,b,a);
+export async function blocked(a,b){
+  return !!await one('SELECT 1 FROM blocks WHERE (owner=? AND target=?) OR (owner=? AND target=?)',a,b,b,a);
 }
-export function voice(action,user,session,data) {
+export async function voice(action,user,session,data) {
   prune();
   if (action==='join') {
     if (user.muted>Date.now()) fail(403,'Your account is muted.');
-    if (!db().prepare("SELECT id FROM rooms WHERE id=? AND kind='voice'").get(data.room)) fail(404,'Voice channel not found.');
+    if (!await one("SELECT id FROM rooms WHERE id=? AND kind='voice'",data.room)) fail(404,'Voice channel not found.');
     rate('join:'+user.id,20);
     const others=[...seats.values()].filter(s=>s.room===data.room && s.uid!==user.id);
     if(others.length>=6) fail(409,'This voice channel is full.');
@@ -42,15 +42,17 @@ export function voice(action,user,session,data) {
   if (user.muted>Date.now()) {disconnect(user.id);fail(403,'Your account is muted.');}
   seat.seen=Date.now();
   if(action==='poll'){
+    const rows=await all('SELECT CASE WHEN owner=? THEN target ELSE owner END AS id FROM blocks WHERE owner=? OR target=?',user.id,user.id,user.id);
+    const hidden=new Set(rows.map(row=>row.id));
     const after=Number(data.after)||0;
-    seat.signals=seat.signals.filter(s=>s.seq>after && seats.has(s.from) && !blocked(user.id,seats.get(s.from).uid));
-    return {peers:[...seats.values()].filter(s=>s.room===seat.room && s!==seat && !blocked(s.uid,user.id))
+    seat.signals=seat.signals.filter(s=>s.seq>after && seats.has(s.from) && !hidden.has(seats.get(s.from).uid));
+    return {peers:[...seats.values()].filter(s=>s.room===seat.room && s!==seat && !hidden.has(s.uid))
       .map(s=>({id:s.uid,label:s.label,ticket:s.ticket})),signals:seat.signals};
   }
   if(action!=='signal') fail(404,'Unknown voice action.');
   rate('signal:'+user.id,450);
   const peer=seats.get(data.to);
-  if (!peer || peer.room!==seat.room || peer===seat || blocked(peer.uid,user.id)) fail(410,'Peer has left.');
+  if (!peer || peer.room!==seat.room || peer===seat || await blocked(peer.uid,user.id)) fail(410,'Peer has left.');
   const input=data.signal;
   let signal;
   if (input?.type==='candidate' && typeof input.candidate==='string' && input.candidate.length<=2048)
