@@ -16,6 +16,7 @@ CREATE INDEX IF NOT EXISTS msg_room ON msgs(room,time);
 CREATE TABLE IF NOT EXISTS reports(id TEXT PRIMARY KEY, by_user TEXT, target TEXT, detail TEXT, message TEXT, time INTEGER, UNIQUE(by_user,target,message));
 CREATE TABLE IF NOT EXISTS blocks(owner TEXT REFERENCES users,target TEXT REFERENCES users,PRIMARY KEY(owner,target));
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY);
+UPDATE users SET admin=0 WHERE admin<>0;
 `;
 const rooms = [['general','general','text'],['games','games','text'],['off-topic','off-topic','text'],['voice-lounge','Lounge','voice']];
 const context = new AsyncLocalStorage();
