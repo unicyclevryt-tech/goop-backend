@@ -1,3 +1,4 @@
+import {chat} from './chat.mjs';
 import http from 'node:http';
 import https from 'node:https';
 import { readFile, stat } from 'node:fs/promises';
@@ -9,7 +10,7 @@ const here=path.dirname(fileURLToPath(import.meta.url));
 const webRoot=path.resolve(here,'../site');
 const HOST=process.env.HOST||'0.0.0.0';
 const PORT=Number(process.env.PORT||4000);
-const ORIGINS=(process.env.CORS_ORIGINS||'https://mathscholar.s3.us-east-2.amazonaws.com').split(',').map(s=>s.trim()).filter(Boolean);
+const ORIGINS=(process.env.CORS_ORIGINS||'https://mathscholar.s3.amazonaws.com,https://mathscholar.s3.us-east-1.amazonaws.com,https://mathscholar.s3.us-east-2.amazonaws.com').split(',').map(s=>s.trim()).filter(Boolean);
 const targets={
   movies:process.env.MOVIES_URL||'http://movies:3000',
   music:process.env.MUSIC_URL||'http://music:2010',
@@ -97,9 +98,10 @@ function forward(req,res,service,rest){
  req.pipe(upstream);
 }
 const server=http.createServer(async(req,res)=>{
+ let pathname;try{pathname=new URL(req.url||'/', 'http://local').pathname;}catch{res.writeHead(400);res.end();return;}
+ if(pathname.startsWith('/api/chat/'))return chat(req,res,pathname,ORIGINS);
  cors(req,res);if(req.method==='OPTIONS'){res.writeHead(204);res.end();return;}
  if(!['GET','HEAD'].includes(req.method)){res.writeHead(405);res.end('Read-only gateway');return;}
- let pathname;try{pathname=new URL(req.url||'/', 'http://local').pathname;}catch{res.writeHead(400);res.end();return;}
  if(pathname==='/health')return reply(res,200,{status:'ok',service:'goop-gateway'});
  if(pathname==='/api/ready'){
   const service=new URL(req.url,'http://local').searchParams.get('service');
