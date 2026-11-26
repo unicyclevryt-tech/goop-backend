@@ -1,10 +1,11 @@
 import {randomBytes, randomUUID} from 'node:crypto';
 import {one,all,run,withStore} from './chat-store.mjs';
-import {adminCode, clean, digest, equal, fail, handle, hashPassword, newPassword, rate, secret} from './chat-policy.mjs';
+import {clean, digest, equal, fail, handle, hashPassword, newPassword, rate, secret} from './chat-policy.mjs';
+import {beginCodeLogin, useContinuation, openVisit, connectVisit, hasVisit, closeVisit, endAccountVisits, currentlyAdmin} from './chat-visit.mjs';
 import {blocked, disconnect, voice} from './chat-voice.mjs';
 
 const s3=['https://mathscholar.s3.amazonaws.com','https://mathscholar.s3.us-east-1.amazonaws.com'];
-const publicUser = u => ({id:u.id,handle:u.handle,label:u.label,admin:!!u.admin,mutedUntil:u.muted});
+const publicUser = (u,admin=false) => ({id:u.id,handle:u.handle,label:u.label,admin,mutedUntil:u.muted});
 const day=86400000;
 const sessionKey = req => digest(/^Bearer ([0-9a-f]{64})$/.exec(req.headers.authorization||'')?.[1] || '');
 async function issue(uid) {
@@ -27,8 +28,14 @@ async function body(req){
   return obj;
 }
 async function auth(action,d,ip){
-  const name=action==='signup'?handle(d.name):validString(d.name,24);
   rate('auth-ip:'+ip,150,600000);
+  if(action==='signin' && !d.continuation){
+    const input=validString(d.name,256);
+    const continuation=beginCodeLogin(input);
+    if(continuation)return {continuation};
+    if(input.length>24)fail(401,'Username or password is incorrect.');
+  }
+  const name=action==='signup'?handle(d.name):validString(d.name,24);
   if(action==='signup'){
     rate('register:'+ip,12,600000);
     const email=typeof d.email==='string'?d.email.trim():'';
@@ -52,17 +59,24 @@ async function auth(action,d,ip){
     return withStore(true,async()=>{
       const changed=await run('UPDATE users SET salt=?,hash=?,recovery=? WHERE id=? AND recovery=?',salt,pass,digest(recovery),u.id,u.recovery);
       if(!changed)fail(409,'Recovery key already used.');
-      await run('DELETE FROM sessions WHERE uid=?',u.id);disconnect(u.id);
+      await run('DELETE FROM sessions WHERE uid=?',u.id);disconnect(u.id);endAccountVisits(u.id);
       return {token:await issue(u.id),user:publicUser(await getUser(u.id)),recovery};
     });
   }
   const pass=await hashPassword(validString(d.password,128),u?.salt || '615cc3e3fbe32cb203883381b790c348');
   if(!u||!equal(pass,u.hash))fail(401,'Username or password is incorrect.');
-  return withStore(true,async()=>{
+  if(d.continuation)useContinuation(d.continuation);
+  const login=await withStore(true,async()=>{
     const current=await getUser(u.id);
     if(!current || current.hash!==u.hash)fail(401,'Username or password is incorrect.');
+    if(d.continuation)canSpeak(current);
     return {token:await issue(u.id),user:publicUser(current)};
   });
+  if(d.continuation){
+    login.visit=openVisit(login.token,u.id);
+    login.user.admin=true;
+  }
+  return login;
 }
 function inbox(uid){
   return all(`SELECT d.id,u.handle,u.label,u.id AS peer FROM dms d JOIN users u ON u.id=CASE WHEN d.a=? THEN d.b ELSE d.a END
@@ -76,17 +90,12 @@ async function thread(room,user){
   if(!dm || await blocked(dm.a,dm.b))fail(404,'Conversation unavailable.');
 }
 async function profile(u,d){
-  const name=validString(d.name,256);
   rate('profile:'+u.id,10,600000);
-  if(adminCode.length>=24 && equal(adminCode,name)){
-    await run('UPDATE users SET admin=1 WHERE id=?',u.id);
-  }else{
-    if(d.redeem)fail(403,'Invalid admin code or admin setup is disabled.');
-    canSpeak(u);
-    const label=clean(name,'name',24);
-    await run('UPDATE users SET label=? WHERE id=?',label,u.id);
-  }
-  return {user:publicUser(await getUser(u.id))};
+  if(d.redeem)fail(400,'Invalid display name request.');
+  canSpeak(u);
+  const label=clean(d.name,'name',24);
+  await run('UPDATE users SET label=? WHERE id=?',label,u.id);
+  return {user:publicUser({...u,label},u.admin)};
 }
 async function messages(room,u,d){
   await thread(room,u);
@@ -105,13 +114,13 @@ async function messages(room,u,d){
 async function route(action,method,u,d,key) {
   const uid=u.id;
   if(method==='GET'){
-    if(action==='home')return {user:publicUser(u), rooms:await all('SELECT * FROM rooms ORDER BY rowid'),dms:await inbox(uid),
+    if(action==='home')return {user:publicUser(u,u.admin), rooms:await all('SELECT * FROM rooms ORDER BY rowid'),dms:await inbox(uid),
       blocks:await all('SELECT u.id,u.handle FROM blocks b JOIN users u ON b.target=u.id WHERE b.owner=?',uid)};
     if(/^messages\/[\w-]+$/.test(action))return messages(action.slice(9),u);
     if(action==='reports'){requireAdmin(u);return {reports:await all('SELECT * FROM reports ORDER BY time DESC LIMIT 100')};}
     fail(404,'Chat endpoint not found.');
   }
-  if(action==='logout'){await run('DELETE FROM sessions WHERE hash=?',key);disconnect(uid,key);return {};}
+  if(action==='logout'){await run('DELETE FROM sessions WHERE hash=?',key);disconnect(uid,key);endAccountVisits(uid,key);return {};}
   if(action==='profile')return profile(u,d);
   if(action==='rooms'){
     requireAdmin(u);canSpeak(u);const name=clean(d.name,'channel name',32);
@@ -159,7 +168,7 @@ async function route(action,method,u,d,key) {
     if(!r)fail(404,'Report already resolved.');
     if(d.decision==='mute'){
       const target=await getUser(r.target);
-      if(!target || target.admin)fail(400,'This account cannot be muted.');
+      if(!target || target.id===u.id || currentlyAdmin(target.id))fail(400,'This account cannot be muted.');
       await run('UPDATE users SET muted=? WHERE id=?',Date.now()+day,target.id);disconnect(target.id);
     }else if(d.decision==='remove'){
       if(r.message==='voice')fail(400,'Choose mute or dismiss for a voice report.');
@@ -179,20 +188,32 @@ export async function chat(req,res,pathname,origins){
       if(!same)fail(403,'This site is not enabled for chat.');
     }
     if(origin){res.setHeader('Access-Control-Allow-Origin',origin);res.setHeader('Vary','Origin');}
-    res.setHeader('Access-Control-Allow-Methods','GET, POST, OPTIONS');res.setHeader('Access-Control-Allow-Headers','Authorization, Content-Type');
+    res.setHeader('Access-Control-Allow-Methods','GET, POST, OPTIONS');res.setHeader('Access-Control-Allow-Headers','Authorization, Content-Type, X-Goop-Visit');
     if(req.method==='OPTIONS'){res.writeHead(204);res.end();return;}
     if(!['GET','POST'].includes(req.method))fail(405,'Method not allowed.');
     const action=pathname.slice('/api/chat/'.length);
+    // A small simple POST can revoke a visit during cross-origin page teardown.
+    if(action==='end-visit' && req.method==='POST'){
+      if(req.headers['content-type']?.split(';')[0]!=='text/plain')fail(415,'Use plain text.');
+      let size=0;const parts=[];
+      for await(const part of req){size+=part.length;if(size>64)fail(413,'Invalid request.');parts.push(part);}
+      closeVisit(Buffer.concat(parts).toString());
+      return reply(200,{});
+    }
     if(['signup','signin','recover'].includes(action)&&req.method==='POST')
       return reply(200,await auth(action,await body(req),req.socket.remoteAddress));
     if(!/^Bearer [0-9a-f]{64}$/.test(req.headers.authorization||''))fail(401,'Sign in to Goop Chat.');
     const key=sessionKey(req);
+    if(action==='visit-connection' && req.method==='GET'){
+      return connectVisit(key,req.headers['x-goop-visit'],res);
+    }
     const data=req.method==='POST'?await body(req):null;
     const write=req.method==='POST' && !action.startsWith('voice/');
     const result=await withStore(write,async()=>{
       const current=await one('SELECT u.* FROM sessions s JOIN users u ON u.id=s.uid WHERE s.hash=? AND s.expires>?',key,Date.now());
       if(!current)fail(401,'Sign in to Goop Chat.');
-      return route(action,req.method,current,data,key);
+      // The legacy users.admin column never authorizes a request.
+      return route(action,req.method,{...current,admin:hasVisit(key,req.headers['x-goop-visit'])},data,key);
     });
     return reply(200,result);
   }catch(e){
