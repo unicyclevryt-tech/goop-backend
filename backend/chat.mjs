@@ -84,8 +84,8 @@ function inbox(uid){
     ORDER BY u.handle`,uid,uid,uid,uid,uid);
 }
 async function thread(room,user){
-  const channel=await one('SELECT kind FROM rooms WHERE id=?',room);
-  if(channel?.kind==='text')return;
+  const channel=await one('SELECT r.kind,l.owner FROM rooms r LEFT JOIN channel_locks l ON l.room=r.id WHERE r.id=?',room);
+  if(channel?.kind==='text')return channel;
   const dm=await one('SELECT a,b FROM dms WHERE id=? AND (a=? OR b=?)',room,user.id,user.id);
   if(!dm || await blocked(dm.a,dm.b))fail(404,'Conversation unavailable.');
 }
@@ -98,26 +98,59 @@ async function profile(u,d){
   return {user:publicUser({...u,label},u.admin)};
 }
 async function messages(room,u,d){
-  await thread(room,u);
-  if(!d) return {messages:await all('SELECT m.id,m.uid,m.label,u.handle,m.text,m.time FROM msgs m LEFT JOIN users u ON u.id=m.uid WHERE m.room=? ORDER BY m.time,m.rowid',room)};
+  const channel=await thread(room,u);
+  if(!d){
+    const rows=await all(`WITH author_roles AS (
+      SELECT mr.uid,r.name FROM member_roles mr JOIN roles r ON r.id=mr.role
+      WHERE mr.uid IN (SELECT DISTINCT uid FROM msgs WHERE room=?) ORDER BY mr.uid,r.name
+    ), badges AS (SELECT uid,group_concat(name) AS names FROM author_roles GROUP BY uid)
+    SELECT m.id,m.uid,m.label,u.handle,m.text,m.time,b.names FROM msgs m
+    LEFT JOIN users u ON u.id=m.uid LEFT JOIN badges b ON b.uid=m.uid
+    WHERE m.room=? ORDER BY m.time,m.rowid`,room,room);
+    return {messages:rows.map(({names,...message})=>({...message,roles:names?names.split(','):[]}))};
+  }
   canSpeak(u);
   const text=clean(d.text,'message',1200), nonce=validString(d.nonce,48);
   if(!/^[a-z0-9-]{20,48}$/i.test(nonce))fail(400,'Invalid message ID.');
   const previous=await one('SELECT id FROM msgs WHERE room=? AND uid=? AND nonce=?',room,u.id,nonce);
   if(previous)return previous;
+  if(channel?.owner && (channel.owner!==u.id || !u.admin))fail(403,'This channel is read-only.');
   rate('send:'+u.id,20);
   const id=randomUUID();
   await run('INSERT INTO msgs VALUES(?,?,?,?,?,?,?)',id,room,u.id,u.label,text,Date.now(),nonce);
   await run('DELETE FROM msgs WHERE room=? AND rowid NOT IN(SELECT rowid FROM msgs WHERE room=? ORDER BY time DESC,rowid DESC LIMIT 150)',room,room);
   return {id};
 }
+async function setChannelLock(room,u,locked){
+  if(typeof locked!=='boolean')fail(400,'Choose a channel lock setting.');
+  const channel=await one(`SELECT r.kind,l.owner FROM rooms r LEFT JOIN channel_locks l ON l.room=r.id
+    WHERE r.id=?`,room);
+  if(channel?.kind!=='text')fail(400,'Choose a text channel.');
+  if(channel.owner && channel.owner!==u.id)fail(403,'Only the person who locked this channel can change it.');
+  if(locked)await run('INSERT OR IGNORE INTO channel_locks(room,owner) VALUES(?,?)',room,u.id);
+  else await run('DELETE FROM channel_locks WHERE room=? AND owner=?',room,u.id);
+  return {};
+}
+async function changeMemberRole(d){
+  if(typeof d.assigned!=='boolean')fail(400,'Choose whether to give or remove the role.');
+  const member=await accountByName(validString(d.handle,24));
+  if(!member)fail(404,'No account has that username.');
+  const role=await one('SELECT id,name FROM roles WHERE id=?',validString(d.role));
+  if(!role)fail(404,'Role unavailable.');
+  if(d.assigned)await run('INSERT OR IGNORE INTO member_roles(uid,role) VALUES(?,?)',member.id,role.id);
+  else await run('DELETE FROM member_roles WHERE uid=? AND role=?',member.id,role.id);
+  return {handle:member.handle,role:role.name};
+}
 async function route(action,method,u,d,key) {
   const uid=u.id;
   if(method==='GET'){
-    if(action==='home')return {user:publicUser(u,u.admin), rooms:await all('SELECT * FROM rooms ORDER BY rowid'),dms:await inbox(uid),
+    if(action==='home')return {user:publicUser(u,u.admin), rooms:await all(`SELECT r.*,l.owner AS lockOwner,p.handle AS lockHandle
+      FROM rooms r LEFT JOIN channel_locks l ON l.room=r.id LEFT JOIN users p ON p.id=l.owner ORDER BY r.rowid`),dms:await inbox(uid),
+      myRoles:await all('SELECT r.name FROM member_roles m JOIN roles r ON r.id=m.role WHERE m.uid=? ORDER BY r.name',uid),
       blocks:await all('SELECT u.id,u.handle FROM blocks b JOIN users u ON b.target=u.id WHERE b.owner=?',uid)};
     if(/^messages\/[\w-]+$/.test(action))return messages(action.slice(9),u);
     if(action==='reports'){requireAdmin(u);return {reports:await all('SELECT * FROM reports ORDER BY time DESC LIMIT 100')};}
+    if(action==='roles'){requireAdmin(u);return {roles:await all('SELECT id,name FROM roles ORDER BY name')};}
     fail(404,'Chat endpoint not found.');
   }
   if(action==='logout'){await run('DELETE FROM sessions WHERE hash=?',key);disconnect(uid,key);endAccountVisits(uid,key);return {};}
@@ -128,7 +161,16 @@ async function route(action,method,u,d,key) {
     if((await one('SELECT count(*) AS n FROM rooms')).n>=100)fail(409,'Channel limit reached.');
     const id=randomUUID();
     if(!await run('INSERT OR IGNORE INTO rooms VALUES(?,?,?)',id,name,d.kind))fail(409,'That channel name is taken.');
+    if(d.locked===true)await setChannelLock(id,u,true);
     return {id};
+  }
+  if(action==='room-lock' || action==='member-role' || action==='roles'){
+    requireAdmin(u);canSpeak(u);
+    if(action==='room-lock')return setChannelLock(validString(d.room),u,d.locked);
+    if(action==='member-role')return changeMemberRole(d);
+    const name=clean(d.name,'role name',32),id=randomUUID();
+    if(!await run('INSERT OR IGNORE INTO roles(id,name) VALUES(?,?)',id,name))fail(409,'That role name is already in use.');
+    return {id,name};
   }
   if(action==='dm'){
     canSpeak(u);rate('dm:'+uid,30);
