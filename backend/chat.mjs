@@ -1,6 +1,7 @@
 import { invitation, playerRoute } from './player.mjs';
 import {randomBytes, randomUUID} from 'node:crypto';
-import {one,all,run,withStore} from './chat-store.mjs';
+import {bridgeConfig, queueDiscordMessage} from './discord-bridge.mjs';
+import {one,all,run,withStore,trimMessages} from './chat-store.mjs';
 import {clean, digest, equal, fail, handle, hashPassword, newPassword, rate, secret} from './chat-policy.mjs';
 import {beginCodeLogin, useContinuation, openVisit, connectVisit, hasVisit, closeVisit, endAccountVisits, currentlyAdmin} from './chat-visit.mjs';
 import {blocked, disconnect, voice} from './chat-voice.mjs';
@@ -105,10 +106,20 @@ async function messages(room,u,d){
       SELECT mr.uid,r.name FROM member_roles mr JOIN roles r ON r.id=mr.role
       WHERE mr.uid IN (SELECT DISTINCT uid FROM msgs WHERE room=?) ORDER BY mr.uid,r.name
     ), badges AS (SELECT uid,group_concat(name) AS names FROM author_roles GROUP BY uid)
-    SELECT m.id,m.uid,m.label,u.handle,m.text,m.time,b.names,i.invite FROM msgs m LEFT JOIN game_invites i ON i.message_id=m.id
+    SELECT m.id,m.uid,m.label,u.handle,m.text,m.time,b.names,i.invite,link.reply_to,original.label AS replyLabel,original.text AS replyText FROM msgs m LEFT JOIN game_invites i ON i.message_id=m.id
     LEFT JOIN users u ON u.id=m.uid LEFT JOIN badges b ON b.uid=m.uid
+    LEFT JOIN discord_links link ON link.goop_id=m.id
+    LEFT JOIN discord_links parent ON parent.channel=link.channel AND parent.discord_id=link.reply_to
+    LEFT JOIN msgs original ON original.id=parent.goop_id AND original.room=m.room
     WHERE m.room=? ORDER BY m.time,m.rowid`,room,room);
-    return {messages:rows.map(({names,invite,...message})=>({...message,...(invite?{invite:JSON.parse(invite)}:{}),roles:names?names.split(','):[]}))};
+    return {messages:rows.map(({names,invite,reply_to,replyLabel,replyText,...message})=>{
+      if(reply_to){
+        const preview=replyText?.replace(/\s+/g,' ').slice(0,100);
+        const prefix=replyLabel ? 'Reply to '+replyLabel+' (“'+preview+'”)' : 'Discord reply';
+        message.text=prefix+' — '+message.text;
+      }
+      return {...message,...(invite?{invite:JSON.parse(invite)}:{}),roles:names?names.split(','):[]};
+    })};
   }
   canSpeak(u);
   const card=d.invite ? invitation(d.invite) : null;
@@ -121,7 +132,8 @@ async function messages(room,u,d){
   const id=randomUUID();
   await run('INSERT INTO msgs VALUES(?,?,?,?,?,?,?)',id,room,u.id,u.label,text,Date.now(),nonce);
   if(card)await run('INSERT INTO game_invites(message_id,invite) VALUES(?,?)',id,JSON.stringify(card));
-  await run('DELETE FROM msgs WHERE room=? AND rowid NOT IN(SELECT rowid FROM msgs WHERE room=? ORDER BY time DESC,rowid DESC LIMIT 150)',room,room);
+  if(channel?.kind==='text')await queueDiscordMessage(room,id);
+  await trimMessages(room);
   return {id};
 }
 async function setChannelLock(room,u,locked){
@@ -148,8 +160,8 @@ async function route(action,method,u,d,key) {
   const uid=u.id;
   if (['player-items','game-report','game-reports'].includes(action)) return playerRoute(action,method,u,d);
   if(method==='GET'){
-    if(action==='home')return {user:publicUser(u,u.admin), rooms:await all(`SELECT r.*,l.owner AS lockOwner,p.handle AS lockHandle
-      FROM rooms r LEFT JOIN channel_locks l ON l.room=r.id LEFT JOIN users p ON p.id=l.owner ORDER BY r.rowid`),dms:await inbox(uid),
+    if(action==='home')return {user:publicUser(u,u.admin), rooms:await all(`SELECT r.id,CASE WHEN r.kind='text' AND r.id=? AND r.id<>'discord' THEN r.name || ' (Discord)' ELSE r.name END AS name,r.kind,l.owner AS lockOwner,p.handle AS lockHandle
+      FROM rooms r LEFT JOIN channel_locks l ON l.room=r.id LEFT JOIN users p ON p.id=l.owner ORDER BY r.rowid`,bridgeConfig()?.room || ''),dms:await inbox(uid),
       myRoles:await all('SELECT r.name FROM member_roles m JOIN roles r ON r.id=m.role WHERE m.uid=? ORDER BY r.name',uid),
       blocks:await all('SELECT u.id,u.handle FROM blocks b JOIN users u ON b.target=u.id WHERE b.owner=?',uid)};
     if(/^messages\/[\w-]+$/.test(action))return messages(action.slice(9),u);

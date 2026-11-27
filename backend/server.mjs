@@ -1,3 +1,4 @@
+import {startDiscordBridge} from './discord-bridge.mjs';
 import {chat} from './chat.mjs';
 import http from 'node:http';
 import https from 'node:https';
@@ -150,3 +151,5 @@ server.on('upgrade',(req,socket,head)=>{
  up.on('error',()=>socket.destroy());up.end();
 });
 server.listen(PORT,HOST,()=>console.log(`Goop gateway listening at http://localhost:${PORT}`));
+
+startDiscordBridge();

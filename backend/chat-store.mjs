@@ -16,6 +16,9 @@ CREATE TABLE IF NOT EXISTS dms(id TEXT PRIMARY KEY, a TEXT REFERENCES users, b T
 CREATE INDEX IF NOT EXISTS dm_inbox ON dms(b);
 CREATE TABLE IF NOT EXISTS msgs(id TEXT PRIMARY KEY, room TEXT NOT NULL, uid TEXT NOT NULL, label TEXT NOT NULL, text TEXT NOT NULL, time INTEGER NOT NULL, nonce TEXT NOT NULL, UNIQUE(room,uid,nonce));
 CREATE INDEX IF NOT EXISTS msg_room ON msgs(room,time);
+CREATE TABLE IF NOT EXISTS discord_links(goop_id TEXT PRIMARY KEY REFERENCES msgs(id) ON DELETE CASCADE, channel TEXT NOT NULL, discord_id TEXT, reply_to TEXT, UNIQUE(channel,discord_id));
+CREATE INDEX IF NOT EXISTS discord_pending ON discord_links(channel,goop_id) WHERE discord_id IS NULL;
+CREATE TABLE IF NOT EXISTS discord_cursors(channel TEXT NOT NULL, room TEXT NOT NULL, last_id TEXT NOT NULL, PRIMARY KEY(channel,room));
 CREATE TABLE IF NOT EXISTS reports(id TEXT PRIMARY KEY, by_user TEXT, target TEXT, detail TEXT, message TEXT, time INTEGER, UNIQUE(by_user,target,message));
 CREATE TABLE IF NOT EXISTS blocks(owner TEXT REFERENCES users,target TEXT REFERENCES users,PRIMARY KEY(owner,target));
 CREATE TABLE IF NOT EXISTS player_items(uid TEXT NOT NULL REFERENCES users(id), key TEXT NOT NULL, item TEXT NOT NULL, PRIMARY KEY(uid,key));
@@ -130,3 +133,7 @@ export async function withStore(write,work){
 export const one=(q,...args)=>context.getStore().one(q,args);
 export const all=(q,...args)=>context.getStore().all(q,args);
 export const run=(q,...args)=>context.getStore().run(q,args);
+
+export const trimMessages = room => run(
+  'DELETE FROM msgs WHERE room=? AND rowid NOT IN(SELECT rowid FROM msgs WHERE room=? ORDER BY time DESC,rowid DESC LIMIT 150)', room,room
+);
