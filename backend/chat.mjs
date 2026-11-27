@@ -1,3 +1,4 @@
+import { invitation, playerRoute } from './player.mjs';
 import {randomBytes, randomUUID} from 'node:crypto';
 import {one,all,run,withStore} from './chat-store.mjs';
 import {clean, digest, equal, fail, handle, hashPassword, newPassword, rate, secret} from './chat-policy.mjs';
@@ -104,13 +105,14 @@ async function messages(room,u,d){
       SELECT mr.uid,r.name FROM member_roles mr JOIN roles r ON r.id=mr.role
       WHERE mr.uid IN (SELECT DISTINCT uid FROM msgs WHERE room=?) ORDER BY mr.uid,r.name
     ), badges AS (SELECT uid,group_concat(name) AS names FROM author_roles GROUP BY uid)
-    SELECT m.id,m.uid,m.label,u.handle,m.text,m.time,b.names FROM msgs m
+    SELECT m.id,m.uid,m.label,u.handle,m.text,m.time,b.names,i.invite FROM msgs m LEFT JOIN game_invites i ON i.message_id=m.id
     LEFT JOIN users u ON u.id=m.uid LEFT JOIN badges b ON b.uid=m.uid
     WHERE m.room=? ORDER BY m.time,m.rowid`,room,room);
-    return {messages:rows.map(({names,...message})=>({...message,roles:names?names.split(','):[]}))};
+    return {messages:rows.map(({names,invite,...message})=>({...message,...(invite?{invite:JSON.parse(invite)}:{}),roles:names?names.split(','):[]}))};
   }
   canSpeak(u);
-  const text=clean(d.text,'message',1200), nonce=validString(d.nonce,48);
+  const card=d.invite ? invitation(d.invite) : null;
+  const text=clean(card?'Play '+card.name:d.text,'message',1200), nonce=validString(d.nonce,48);
   if(!/^[a-z0-9-]{20,48}$/i.test(nonce))fail(400,'Invalid message ID.');
   const previous=await one('SELECT id FROM msgs WHERE room=? AND uid=? AND nonce=?',room,u.id,nonce);
   if(previous)return previous;
@@ -118,6 +120,7 @@ async function messages(room,u,d){
   rate('send:'+u.id,20);
   const id=randomUUID();
   await run('INSERT INTO msgs VALUES(?,?,?,?,?,?,?)',id,room,u.id,u.label,text,Date.now(),nonce);
+  if(card)await run('INSERT INTO game_invites(message_id,invite) VALUES(?,?)',id,JSON.stringify(card));
   await run('DELETE FROM msgs WHERE room=? AND rowid NOT IN(SELECT rowid FROM msgs WHERE room=? ORDER BY time DESC,rowid DESC LIMIT 150)',room,room);
   return {id};
 }
@@ -143,6 +146,7 @@ async function changeMemberRole(d){
 }
 async function route(action,method,u,d,key) {
   const uid=u.id;
+  if (['player-items','game-report','game-reports'].includes(action)) return playerRoute(action,method,u,d);
   if(method==='GET'){
     if(action==='home')return {user:publicUser(u,u.admin), rooms:await all(`SELECT r.*,l.owner AS lockOwner,p.handle AS lockHandle
       FROM rooms r LEFT JOIN channel_locks l ON l.room=r.id LEFT JOIN users p ON p.id=l.owner ORDER BY r.rowid`),dms:await inbox(uid),
