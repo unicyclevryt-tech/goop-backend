@@ -18,6 +18,9 @@ CREATE TABLE IF NOT EXISTS msgs(id TEXT PRIMARY KEY, room TEXT NOT NULL, uid TEX
 CREATE INDEX IF NOT EXISTS msg_room ON msgs(room,time);
 CREATE TABLE IF NOT EXISTS reports(id TEXT PRIMARY KEY, by_user TEXT, target TEXT, detail TEXT, message TEXT, time INTEGER, UNIQUE(by_user,target,message));
 CREATE TABLE IF NOT EXISTS blocks(owner TEXT REFERENCES users,target TEXT REFERENCES users,PRIMARY KEY(owner,target));
+CREATE TABLE IF NOT EXISTS player_items(uid TEXT NOT NULL REFERENCES users(id), key TEXT NOT NULL, item TEXT NOT NULL, PRIMARY KEY(uid,key));
+CREATE TABLE IF NOT EXISTS game_reports(id TEXT PRIMARY KEY, uid TEXT NOT NULL REFERENCES users(id), source TEXT NOT NULL, title TEXT NOT NULL, detail TEXT NOT NULL, created INTEGER NOT NULL, UNIQUE(uid,source,title));
+CREATE TABLE IF NOT EXISTS game_invites(message_id TEXT PRIMARY KEY REFERENCES msgs(id) ON DELETE CASCADE, invite TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY);
 UPDATE users SET admin=0 WHERE admin<>0;
 `;
