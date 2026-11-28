@@ -21,6 +21,25 @@ export function newPassword(value) {
   return value;
 }
 export const adminCode = process.env.GOOP_CHAT_ADMIN_CODE || '';
+// Staff keys, lowest to highest rank. GOOP_CHAT_ADMIN_CODE is the owner key and can do everything.
+export const staffRanks = ['','trial mod','moderator','admin','co-owner','owner'];
+export const staffCodes = [
+  [1, process.env.GOOP_CHAT_TRIAL_MOD_CODE],
+  [2, process.env.GOOP_CHAT_MOD_CODE],
+  [3, process.env.GOOP_CHAT_STAFF_ADMIN_CODE],
+  [4, process.env.GOOP_CHAT_CO_OWNER_CODE],
+  [5, adminCode],
+].map(([level,code])=>[level,(code||'').trim()]).filter(([,code])=>code.length>=24);
+// What each rank may do. Ranks inherit everything below them.
+export function permissions(level){
+  return {
+    modChannels: level>=1, timeout: level>=1, reports: level>=1,
+    kick: level>=2,
+    tempBan: level>=3,
+    permBan: level>=4, manage: level>=4,
+    deleteAny: level>=5,
+  };
+}
 const extra = (process.env.GOOP_CHAT_BLOCKED_WORDS || '').toLowerCase().split(',').map(s=>s.trim()).filter(Boolean);
 // Common misspellings and shorthand that a plain word list misses. Spellings that only
 // swap letters for sound-alikes (ph→f, c/ck/q→k) are caught by sound() below instead.
@@ -74,7 +93,7 @@ export function clean(value, kind, limit) {
   });
   const compact = squeeze(tokens.join(''));
   const sounds = tokens.map(sound);
-  if ((adminCode && s.includes(adminCode)) || matches(tokens) || matches(sounds) || matches(s.toLowerCase().match(/[a-z]+/g)||[]) ||
+  if (staffCodes.some(([,code])=>s.includes(code)) || matches(tokens) || matches(sounds) || matches(s.toLowerCase().match(/[a-z]+/g)||[]) ||
       sounds.some((w,i)=>!safeWords.has(tokens[i]) && roots.some(r=>r.test(squeeze(w)))) ||
       phrases.some(p=>compact.includes(squeeze(fold(p).replace(/[^a-z0-9]/g,'')))) ||
       (kind!=='message' && badNameParts.some(p=>p.test(tokens.join(''))))) fail(400,'Please choose different wording. The chat filter blocked this '+kind+'.');

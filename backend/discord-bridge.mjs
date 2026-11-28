@@ -36,7 +36,7 @@ async function importText(config, msg) {
   if (room?.kind !== 'text' || room.owner) return;
   const uid='discord:'+msg.author.id, label=senderLabel(msg.author);
   const user=await one('SELECT muted FROM users WHERE id=?',uid);
-  if (user?.muted > Date.now() || await one('SELECT 1 AS banned FROM bans WHERE uid=?',uid)) return;
+  if (user?.muted > Date.now() || await one('SELECT 1 AS banned FROM bans WHERE uid=? AND (until IS NULL OR until>?)',uid,Date.now())) return;
   const time=Number((BigInt(msg.id)>>22n)+epoch);
   // Use message time so a burst of history after a restart follows the same per-minute limit.
   const recent=await one('SELECT count(*) AS n FROM msgs WHERE uid=? AND room=? AND time BETWEEN ? AND ?',uid,config.room,time-60000,time);
@@ -115,12 +115,15 @@ export function discordRelay(config, request=fetch) {
   }
   async function push() {
     await ready();
-    const pending=await withStore(false,()=>all(`SELECT m.id,m.label,m.text FROM discord_links l JOIN msgs m ON m.id=l.goop_id
+    const pending=await withStore(false,()=>all(`SELECT m.id,m.label,m.text,
+      (SELECT group_concat(name,', ') FROM (SELECT r.name FROM member_roles mr JOIN roles r ON r.id=mr.role WHERE mr.uid=m.uid ORDER BY r.name)) AS roles
+      FROM discord_links l JOIN msgs m ON m.id=l.goop_id
       JOIN rooms r ON r.id=m.room AND r.kind='text' WHERE l.channel=? AND m.room=? AND l.discord_id IS NULL
       ORDER BY m.time,m.rowid LIMIT 10`,channel,room));
     for(const msg of pending) {
       const body={
-        content:'**'+markdownName(msg.label)+':** '+msg.text,
+        // Goop chat roles appear in brackets after the name, like **amy** [Helpers]: hi
+        content:'**'+markdownName(msg.label)+'**'+(msg.roles?' ['+markdownName(msg.roles)+']':'')+': '+msg.text,
         allowed_mentions:{parse:[],replied_user:false},
         flags:4, // Suppress automatic link embeds.
         nonce:createHash('sha256').update(channel+'/'+msg.id).digest('hex').slice(0,24),enforce_nonce:true

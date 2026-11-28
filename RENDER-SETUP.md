@@ -40,3 +40,21 @@ With the gateway showing healthy, extract this ZIP on your **own Windows PC**, i
 - Render free/low-tier services may sleep, lack memory, or lose on-disk caches. Check prices and resource plans before deploying.
 - GoopBlox requires a full Roblox engine and browser support; it must open top-level and is not guaranteed to function via reverse proxy.
 - This package does not deploy anything automatically to your accounts. A full end-to-end live deployment has not been verified.
+
+## Chat staff keys
+
+Staff sign in to Goop Chat by typing their key in the Username box, then their own
+username and password. Set each key on the **goop-gateway2** service under
+Environment. Every key must be at least 24 characters, and must be different from
+the others. Leave a variable unset to turn that rank off.
+
+| Variable | Rank | Can do |
+| --- | --- | --- |
+| `GOOP_CHAT_TRIAL_MOD_CODE` | Trial mod | See mod-only channels, time people out |
+| `GOOP_CHAT_MOD_CODE` | Moderator | Trial mod, plus kick |
+| `GOOP_CHAT_STAFF_ADMIN_CODE` | Admin | Moderator, plus temporary bans (1–365 days) |
+| `GOOP_CHAT_CO_OWNER_CODE` | Co-owner | Admin, plus permanent bans and mutes, creating channels and roles, channel settings |
+| `GOOP_CHAT_ADMIN_CODE` | Owner | Everything, including deleting anyone's messages |
+
+Staff cannot act on someone signed in with the same or a higher rank. A staff key
+typed into a chat message is blocked by the filter.
