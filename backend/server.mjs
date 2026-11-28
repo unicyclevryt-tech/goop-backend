@@ -6,6 +6,7 @@ import { readFile, stat } from 'node:fs/promises';
 import { Readable } from 'node:stream';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { plays } from './plays.mjs';
 
 const here=path.dirname(fileURLToPath(import.meta.url));
 const webRoot=path.resolve(here,'../site');
@@ -102,6 +103,7 @@ const server=http.createServer(async(req,res)=>{
  let pathname;try{pathname=new URL(req.url||'/', 'http://local').pathname;}catch{res.writeHead(400);res.end();return;}
  if(pathname.startsWith('/api/chat/'))return chat(req,res,pathname,ORIGINS);
  cors(req,res);if(req.method==='OPTIONS'){res.writeHead(204);res.end();return;}
+ if (pathname.startsWith('/api/plays/')) return plays(req, res, pathname);
  if(!['GET','HEAD'].includes(req.method)){res.writeHead(405);res.end('Read-only gateway');return;}
  if(pathname==='/health')return reply(res,200,{status:'ok',service:'goop-gateway'});
  if(pathname==='/api/ready'){
