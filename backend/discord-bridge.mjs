@@ -36,7 +36,7 @@ async function importText(config, msg) {
   if (room?.kind !== 'text' || room.owner) return;
   const uid='discord:'+msg.author.id, label=senderLabel(msg.author);
   const user=await one('SELECT muted FROM users WHERE id=?',uid);
-  if (user?.muted > Date.now()) return;
+  if (user?.muted > Date.now() || await one('SELECT 1 AS banned FROM bans WHERE uid=?',uid)) return;
   const time=Number((BigInt(msg.id)>>22n)+epoch);
   // Use message time so a burst of history after a restart follows the same per-minute limit.
   const recent=await one('SELECT count(*) AS n FROM msgs WHERE uid=? AND room=? AND time BETWEEN ? AND ?',uid,config.room,time-60000,time);

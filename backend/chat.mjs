@@ -18,7 +18,19 @@ async function issue(uid) {
 }
 const accountByName = name => one('SELECT * FROM users WHERE handle=?',name);
 const getUser = id => one('SELECT * FROM users WHERE id=?',id);
-function canSpeak(u){ if(u.muted>Date.now()) fail(403,'Your account is muted until '+new Date(u.muted).toUTCString()+'.'); }
+const forever=253402300799000; // a mute that never ends (the year 9999)
+function canSpeak(u){
+  if(u.muted>=forever) fail(403,'Your account is muted permanently.');
+  if(u.muted>Date.now()) fail(403,'Your account is muted until '+new Date(u.muted).toUTCString()+'.');
+}
+const isBanned = uid => one('SELECT 1 AS banned FROM bans WHERE uid=?',uid);
+// A locked channel accepts posts from the admin who locked it and from members of its posting roles.
+async function canPostIn(room,channel,u){
+  if(!channel?.owner)return true;
+  if(channel.owner===u.id && u.admin)return true;
+  return !!await one(`SELECT 1 AS ok FROM channel_post_roles c JOIN member_roles m ON m.role=c.role
+    WHERE c.room=? AND m.uid=?`,room,u.id);
+}
 function requireAdmin(u){ if(!u.admin)fail(403,'Channel admin access is required.'); }
 function validString(v,n=120){if(typeof v!=='string'||!v.length||v.length>n)fail(400,'Invalid input.');return v;}
 async function body(req){
@@ -71,6 +83,7 @@ async function auth(action,d,ip){
   const login=await withStore(true,async()=>{
     const current=await getUser(u.id);
     if(!current || current.hash!==u.hash)fail(401,'Username or password is incorrect.');
+    if(await isBanned(current.id))fail(403,'This account is banned from Goop Chat.');
     if(d.continuation)canSpeak(current);
     return {token:await issue(u.id),user:publicUser(current)};
   });
@@ -127,7 +140,7 @@ async function messages(room,u,d){
   if(!/^[a-z0-9-]{20,48}$/i.test(nonce))fail(400,'Invalid message ID.');
   const previous=await one('SELECT id FROM msgs WHERE room=? AND uid=? AND nonce=?',room,u.id,nonce);
   if(previous)return previous;
-  if(channel?.owner && (channel.owner!==u.id || !u.admin))fail(403,'This channel is read-only.');
+  if(!await canPostIn(room,channel,u))fail(403,'This channel is read-only.');
   rate('send:'+u.id,20);
   const id=randomUUID();
   await run('INSERT INTO msgs VALUES(?,?,?,?,?,?,?)',id,room,u.id,u.label,text,Date.now(),nonce);
@@ -156,17 +169,86 @@ async function changeMemberRole(d){
   else await run('DELETE FROM member_roles WHERE uid=? AND role=?',member.id,role.id);
   return {handle:member.handle,role:role.name};
 }
+async function withPosting(u,home){
+  const postRoles=await all('SELECT c.room,r.id,r.name FROM channel_post_roles c JOIN roles r ON r.id=c.role ORDER BY r.name');
+  const mine=new Set((await all('SELECT role FROM member_roles WHERE uid=?',u.id)).map(r=>r.role));
+  // Database rows can be read-only, so build plain objects.
+  home.rooms=home.rooms.map(room=>{
+    const roles=postRoles.filter(p=>p.room===room.id);
+    return {...room,postRoles:roles.map(({id,name})=>({id,name})),
+      canPost:room.kind==='text' && (!room.lockOwner || (room.lockOwner===u.id && !!u.admin) || roles.some(r=>mine.has(r.id)))};
+  });
+  return home;
+}
+async function memberTarget(d){
+  const target=typeof d.target==='string' ? await getUser(validString(d.target,80)) : await accountByName(validString(d.handle,24));
+  if(!target)fail(404,'No account has that username.');
+  return target;
+}
+// Admin moderation of one account: timed or permanent mutes, and permanent bans.
+async function moderateMember(u,d){
+  const target=await memberTarget(d);
+  const name=target.handle ? '@'+target.handle : target.label;
+  if(['mute','ban'].includes(d.action) && (target.id===u.id || currentlyAdmin(target.id)))fail(400,'This account cannot be moderated.');
+  if(d.action==='mute'){
+    const minutes=d.minutes;
+    if(minutes!=='forever' && !(Number.isInteger(minutes) && minutes>=1 && minutes<=525600))fail(400,'Choose how long to mute.');
+    await run('UPDATE users SET muted=? WHERE id=?',minutes==='forever'?forever:Date.now()+minutes*60000,target.id);
+    disconnect(target.id);
+    return {message:name+(minutes==='forever'?' is muted permanently.':' is muted.')};
+  }
+  if(d.action==='unmute'){await run('UPDATE users SET muted=0 WHERE id=?',target.id);return {message:name+' can chat again.'};}
+  if(d.action==='ban'){
+    await run('INSERT OR REPLACE INTO bans(uid,by_user,time) VALUES(?,?,?)',target.id,u.id,Date.now());
+    await run('DELETE FROM sessions WHERE uid=?',target.id);
+    if(d.purge===true)await run('DELETE FROM msgs WHERE uid=?',target.id);
+    disconnect(target.id);endAccountVisits(target.id);
+    return {message:name+' is banned'+(d.purge===true?' and their messages were deleted.':'.')};
+  }
+  if(d.action==='unban'){await run('DELETE FROM bans WHERE uid=?',target.id);return {message:name+' is no longer banned.'};}
+  fail(400,'Unknown moderation action.');
+}
+async function moderationList(){
+  return {
+    banned:await all(`SELECT u.id,u.handle,u.label,b.time FROM bans b JOIN users u ON u.id=b.uid ORDER BY b.time DESC LIMIT 200`),
+    muted:await all(`SELECT id,handle,label,muted FROM users WHERE muted>? ORDER BY muted LIMIT 200`,Date.now()),
+  };
+}
+async function deleteMessage(u,d){
+  const room=validString(d.room), id=validString(d.message,80);
+  await thread(room,u);
+  const msg=await one('SELECT uid FROM msgs WHERE id=? AND room=?',id,room);
+  if(!msg)fail(404,'Message unavailable.');
+  if(msg.uid!==u.id && !u.admin)fail(403,'You can only delete your own messages.');
+  await run('DELETE FROM msgs WHERE id=?',id);
+  await run('DELETE FROM reports WHERE message=?',id);
+  return {};
+}
+async function channelSettings(u,d){
+  const room=validString(d.room);
+  if(typeof d.locked!=='boolean')fail(400,'Choose who can post.');
+  const roles=Array.isArray(d.roles)?d.roles:[];
+  if(roles.length>50 || roles.some(r=>typeof r!=='string'))fail(400,'Invalid roles.');
+  await setChannelLock(room,u,d.locked);
+  await run('DELETE FROM channel_post_roles WHERE room=?',room);
+  for(const role of new Set(roles)){
+    if(!await one('SELECT 1 AS ok FROM roles WHERE id=?',role))fail(404,'Role unavailable.');
+    await run('INSERT INTO channel_post_roles(room,role) VALUES(?,?)',room,role);
+  }
+  return {};
+}
 async function route(action,method,u,d,key) {
   const uid=u.id;
   if (['player-items','game-report','game-reports'].includes(action)) return playerRoute(action,method,u,d);
   if(method==='GET'){
-    if(action==='home')return {user:publicUser(u,u.admin), rooms:await all(`SELECT r.id,CASE WHEN r.kind='text' AND r.id=? AND r.id<>'discord' THEN r.name || ' (Discord)' ELSE r.name END AS name,r.kind,l.owner AS lockOwner,p.handle AS lockHandle
+    if(action==='home')return withPosting(u,{user:publicUser(u,u.admin), rooms:await all(`SELECT r.id,CASE WHEN r.kind='text' AND r.id=? AND r.id<>'discord' THEN r.name || ' (Discord)' ELSE r.name END AS name,r.kind,l.owner AS lockOwner,p.handle AS lockHandle
       FROM rooms r LEFT JOIN channel_locks l ON l.room=r.id LEFT JOIN users p ON p.id=l.owner ORDER BY r.rowid`,bridgeConfig()?.room || ''),dms:await inbox(uid),
       myRoles:await all('SELECT r.name FROM member_roles m JOIN roles r ON r.id=m.role WHERE m.uid=? ORDER BY r.name',uid),
-      blocks:await all('SELECT u.id,u.handle FROM blocks b JOIN users u ON b.target=u.id WHERE b.owner=?',uid)};
+      blocks:await all('SELECT u.id,u.handle FROM blocks b JOIN users u ON b.target=u.id WHERE b.owner=?',uid)});
     if(/^messages\/[\w-]+$/.test(action))return messages(action.slice(9),u);
     if(action==='reports'){requireAdmin(u);return {reports:await all('SELECT * FROM reports ORDER BY time DESC LIMIT 100')};}
     if(action==='roles'){requireAdmin(u);return {roles:await all('SELECT id,name FROM roles ORDER BY name')};}
+    if(action==='moderation'){requireAdmin(u);return moderationList();}
     fail(404,'Chat endpoint not found.');
   }
   if(action==='logout'){await run('DELETE FROM sessions WHERE hash=?',key);disconnect(uid,key);endAccountVisits(uid,key);return {};}
@@ -180,6 +262,9 @@ async function route(action,method,u,d,key) {
     if(d.locked===true)await setChannelLock(id,u,true);
     return {id};
   }
+  if(action==='delete-message')return deleteMessage(u,d);
+  if(action==='moderate-member'){requireAdmin(u);return moderateMember(u,d);}
+  if(action==='channel-settings'){requireAdmin(u);canSpeak(u);return channelSettings(u,d);}
   if(action==='room-lock' || action==='member-role' || action==='roles'){
     requireAdmin(u);canSpeak(u);
     if(action==='room-lock')return setChannelLock(validString(d.room),u,d.locked);
@@ -228,6 +313,8 @@ async function route(action,method,u,d,key) {
       const target=await getUser(r.target);
       if(!target || target.id===u.id || currentlyAdmin(target.id))fail(400,'This account cannot be muted.');
       await run('UPDATE users SET muted=? WHERE id=?',Date.now()+day,target.id);disconnect(target.id);
+    }else if(d.decision==='mute-week' || d.decision==='ban'){
+      await moderateMember(u,d.decision==='ban'?{target:r.target,action:'ban'}:{target:r.target,action:'mute',minutes:10080});
     }else if(d.decision==='remove'){
       if(r.message==='voice')fail(400,'Choose mute or dismiss for a voice report.');
       await run('DELETE FROM msgs WHERE id=?',r.message);
@@ -270,6 +357,7 @@ export async function chat(req,res,pathname,origins){
     const result=await withStore(write,async()=>{
       const current=await one('SELECT u.* FROM sessions s JOIN users u ON u.id=s.uid WHERE s.hash=? AND s.expires>?',key,Date.now());
       if(!current)fail(401,'Sign in to Goop Chat.');
+      if(await isBanned(current.id))fail(403,'This account is banned from Goop Chat.');
       // The legacy users.admin column never authorizes a request.
       return route(action,req.method,{...current,admin:hasVisit(key,req.headers['x-goop-visit'])},data,key);
     });

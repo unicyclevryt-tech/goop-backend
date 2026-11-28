@@ -22,18 +22,37 @@ export function newPassword(value) {
 }
 export const adminCode = process.env.GOOP_CHAT_ADMIN_CODE || '';
 const extra = (process.env.GOOP_CHAT_BLOCKED_WORDS || '').toLowerCase().split(',').map(s=>s.trim()).filter(Boolean);
-const blocked = ['ass','dick','pussy','bastards','bitching','fucked','fucks','fck','stfu','stf u','wtf','shits','piss','douchebag','fuck','fucker','fucking','motherfucker','shit','bullshit','shitty','bitch','bitches','asshole','bastard','dickhead','cunt','whore','slut','nigger','nigga','faggot','fag','retard','kike','chink','spic','tranny','porn','pornhub','nudes','kys',...extra];
+// Common misspellings and shorthand that a plain word list misses. Spellings that only
+// swap letters for sound-alikes (ph→f, c/ck/q→k) are caught by sound() below instead.
+const variants = ['fk','fks','fking','fkin','fkn','fker','fkr','fked','fkd','fku','fkoff','fuk','fuking','fukin','fukn','fuker','fukr','fuks','fukd','fuked','fukoff','fukyou','fuku',
+  'mf','mfs','mfer','mfers','mofo','mofos','motherfuker','muthafuka','muthafucka','mothafucka','mtherfker',
+  'sht','shyt','shiet','shite','shiit','shitt','bs','bullsht','horseshit','dipshit','shithead','shitface','shitass',
+  'btch','bytch','biatch','biotch','beotch','bich','bish','bitchass','sonofabitch',
+  'azz','arse','arsehole','asshat','asswipe','dumbass','jackass','smartass','fatass','dumass','dumbazz',
+  'dik','dikhead','dck','dickface','dickwad','cok','cocksucker','twat','wanker','prick','bellend','tits','titties','boobs','cum','jizz','horny','sexy','sex',
+  'kunt','cnt','whor','hoe','hoes','thot','slvt','skank',
+  'niga','nigah','nigguh','niggah','nibba','nibber','fagot','faggit','fagget','fgt','tard','retarded','ret4rd',
+  'gtfo','stfu','kms','kysnow','dumbfuck','fuckboy','fuckface','fuckoff','fuckyou','fucku'];
+const blocked = [...variants,'ass','dick','pussy','bastards','bitching','fucked','fucks','fck','stfu','stf u','wtf','shits','piss','douchebag','fuck','fucker','fucking','motherfucker','shit','bullshit','shitty','bitch','bitches','asshole','bastard','dickhead','cunt','whore','slut','nigger','nigga','faggot','fag','retard','kike','chink','spic','tranny','porn','pornhub','nudes','kys',...extra];
 const phrases = ['kill yourself','go kill yourself','send nudes','i will kill you','i am going to kill you','go die', ...extra.filter(s=>s.includes(' '))];
 const controls = /[\p{Cf}\p{Extended_Pictographic}\p{Regional_Indicator}\u20e3\ufe0f\u0000-\u0008\u000b-\u001f\u007f]/u;
 const swaps = {'0':'o','1':'i','3':'e','4':'a','5':'s','7':'t','8':'b','@':'a','$':'s','!':'i','а':'a','е':'e','о':'o','р':'p','с':'c','х':'x','і':'i','ѕ':'s','у':'y'};
 const fold = s => s.normalize('NFKD').toLowerCase().replace(/\p{M}/gu,'').replace(/[0134578@$!аеорсхіѕу]/gu, c=>swaps[c]);
 const squeeze = s => s.replace(/(.)\1+/g,'$1');
+// Spell words the way they sound, so "phuck", "fuq", "fucc" and "kunt" match their dictionary words.
+const sound = s => s.replace(/ph/g,'f').replace(/ck/g,'k').replace(/[cq]/g,'k').replace(/x/g,'ks');
+// Word roots that are blocked inside longer words too ("fukkin", "shitposting", "bitchy").
+// Checked against single words only, never across word boundaries.
+const roots = ['fuk','shit','bitkh','kunt','niga','nigu','fagot','faget','fagit','retard','whore','slut','pusy','motherf','koksuk']
+  .map(r=>new RegExp(r));
+// Ordinary words that happen to contain a root above.
+const safeWords = new Set(['fukushima','fuchsia','fuchsias','scunthorpe','shiitake','shitake','retardant','retardants','retardation']);
 const alphanumeric = value => fold(value).replace(/[^a-z0-9]/g,'');
 function repeatedPattern(term) {
   return Array.from(term.matchAll(/(.)\1*/g), m => m[1]+'{'+m[0].length+',}').join('');
 }
 const dictionary = new Map();
-for (const term of blocked.map(alphanumeric).filter(Boolean)) {
+for (const term of [...new Set(blocked.map(alphanumeric).filter(Boolean).flatMap(t=>[t,sound(t)]))]) {
   const key=squeeze(term), tests=dictionary.get(key)||[];
   tests.push(new RegExp('^'+repeatedPattern(term)+'$'));dictionary.set(key,tests);
 }
@@ -54,7 +73,9 @@ export function clean(value, kind, limit) {
     return false;
   });
   const compact = squeeze(tokens.join(''));
-  if ((adminCode && s.includes(adminCode)) || matches(tokens) || matches(s.toLowerCase().match(/[a-z]+/g)||[]) ||
+  const sounds = tokens.map(sound);
+  if ((adminCode && s.includes(adminCode)) || matches(tokens) || matches(sounds) || matches(s.toLowerCase().match(/[a-z]+/g)||[]) ||
+      sounds.some((w,i)=>!safeWords.has(tokens[i]) && roots.some(r=>r.test(squeeze(w)))) ||
       phrases.some(p=>compact.includes(squeeze(fold(p).replace(/[^a-z0-9]/g,'')))) ||
       (kind!=='message' && badNameParts.some(p=>p.test(tokens.join(''))))) fail(400,'Please choose different wording. The chat filter blocked this '+kind+'.');
   if (kind !== 'message' && !/^[A-Za-z0-9][A-Za-z0-9 _-]*$/.test(s))

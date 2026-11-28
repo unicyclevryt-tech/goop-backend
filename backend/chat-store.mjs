@@ -25,6 +25,8 @@ CREATE TABLE IF NOT EXISTS player_items(uid TEXT NOT NULL REFERENCES users(id), 
 CREATE TABLE IF NOT EXISTS game_reports(id TEXT PRIMARY KEY, uid TEXT NOT NULL REFERENCES users(id), source TEXT NOT NULL, title TEXT NOT NULL, detail TEXT NOT NULL, created INTEGER NOT NULL, UNIQUE(uid,source,title));
 CREATE TABLE IF NOT EXISTS game_invites(message_id TEXT PRIMARY KEY REFERENCES msgs(id) ON DELETE CASCADE, invite TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS bans(uid TEXT PRIMARY KEY, by_user TEXT, time INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS channel_post_roles(room TEXT NOT NULL REFERENCES rooms(id), role TEXT NOT NULL REFERENCES roles(id), PRIMARY KEY(room,role));
 UPDATE users SET admin=0 WHERE admin<>0;
 `;
 const rooms = [['general','general','text'],['games','games','text'],['off-topic','off-topic','text'],['voice-lounge','Lounge','voice']];
